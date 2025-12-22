@@ -11,27 +11,24 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Live Feedback System API")
 
-# CORS Configuration - UPDATE THIS WITH YOUR VERCEL URL
+# CORS Configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
         "http://localhost:3000",
-        "https://your-frontend-name.vercel.app",  # ⚠️ REPLACE WITH YOUR VERCEL URL
         "https://*.vercel.app",
+        "*"  # Allow all for testing - restrict in production
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ... rest of the code stays the same
 # Connection Manager for WebSocket
 class ConnectionManager:
     def __init__(self):
-        # Store active connections: {room_id: {role: [connections]}}
         self.active_connections: Dict[str, Dict[str, Set[WebSocket]]] = {}
-        # Store student metadata: {room_id: {student_id: {name, connection}}}
         self.students_metadata: Dict[str, Dict[str, dict]] = {}
         
     async def connect(self, websocket: WebSocket, room_id: str, role: str, user_id: str = None, name: str = None):
@@ -43,7 +40,6 @@ class ConnectionManager:
         
         self.active_connections[room_id][role].add(websocket)
         
-        # Store student metadata
         if role == "student" and user_id:
             self.students_metadata[room_id][user_id] = {
                 "name": name or f"Student {user_id}",
@@ -52,7 +48,6 @@ class ConnectionManager:
                 "status": "active"
             }
             
-            # Notify teacher about new student
             await self.broadcast_to_teachers(room_id, {
                 "type": "student_joined",
                 "student_id": user_id,
@@ -62,7 +57,6 @@ class ConnectionManager:
         
         logger.info(f"{role.capitalize()} {user_id or 'unknown'} joined room {room_id}")
         
-        # Send current participants list to the new connection
         if role == "teacher":
             await self.send_participants_list(websocket, room_id)
     
@@ -71,13 +65,11 @@ class ConnectionManager:
             if websocket in self.active_connections[room_id][role]:
                 self.active_connections[room_id][role].remove(websocket)
             
-            # Remove student metadata and notify teacher
             if role == "student" and user_id and room_id in self.students_metadata:
                 if user_id in self.students_metadata[room_id]:
                     student_name = self.students_metadata[room_id][user_id]["name"]
                     del self.students_metadata[room_id][user_id]
                     
-                    # Notify teacher about student leaving
                     import asyncio
                     asyncio.create_task(self.broadcast_to_teachers(room_id, {
                         "type": "student_left",
@@ -86,7 +78,6 @@ class ConnectionManager:
                         "timestamp": datetime.now().isoformat()
                     }))
             
-            # Clean up empty rooms
             if not self.active_connections[room_id]["teacher"] and not self.active_connections[room_id]["student"]:
                 del self.active_connections[room_id]
                 if room_id in self.students_metadata:
@@ -95,7 +86,6 @@ class ConnectionManager:
         logger.info(f"{role.capitalize()} {user_id or 'unknown'} left room {room_id}")
     
     async def send_participants_list(self, websocket: WebSocket, room_id: str):
-        """Send list of all participants in the room"""
         if room_id in self.students_metadata:
             participants = [
                 {
@@ -114,7 +104,6 @@ class ConnectionManager:
             })
     
     async def broadcast_to_teachers(self, room_id: str, message: dict):
-        """Send message to all teachers in the room"""
         if room_id in self.active_connections:
             disconnected = set()
             for connection in self.active_connections[room_id]["teacher"]:
@@ -124,12 +113,10 @@ class ConnectionManager:
                     logger.error(f"Error sending to teacher: {e}")
                     disconnected.add(connection)
             
-            # Clean up disconnected connections
             for conn in disconnected:
                 self.active_connections[room_id]["teacher"].discard(conn)
     
     async def send_to_student(self, room_id: str, student_id: str, message: dict):
-        """Send message to a specific student"""
         if room_id in self.students_metadata and student_id in self.students_metadata[room_id]:
             connection = self.students_metadata[room_id][student_id]["connection"]
             try:
@@ -144,7 +131,12 @@ async def root():
     return {
         "message": "Live Feedback System API",
         "version": "1.0.0",
-        "status": "running"
+        "status": "running",
+        "endpoints": {
+            "health": "/health",
+            "websocket": "/ws/{room_id}/{role}/{user_id}",
+            "room_stats": "/rooms/{room_id}/stats"
+        }
     }
 
 @app.get("/health")
@@ -154,9 +146,16 @@ async def health_check():
         "timestamp": datetime.now().isoformat()
     }
 
+@app.get("/api/health")
+async def api_health_check():
+    """Alternative health check endpoint"""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat()
+    }
+
 @app.get("/rooms/{room_id}/stats")
 async def get_room_stats(room_id: str):
-    """Get statistics for a specific room"""
     if room_id not in manager.active_connections:
         return {
             "room_id": room_id,
@@ -182,16 +181,12 @@ async def get_room_stats(room_id: str):
 async def websocket_endpoint(websocket: WebSocket, room_id: str, role: str, user_id: str):
     """
     WebSocket endpoint for real-time communication
-    - room_id: Unique identifier for the class/session
-    - role: Either 'teacher' or 'student'
-    - user_id: Unique identifier for the user
     """
     
     if role not in ["teacher", "student"]:
         await websocket.close(code=1008, reason="Invalid role")
         return
     
-    # Get student name from query params if provided
     name = None
     try:
         query_params = dict(websocket.query_params)
@@ -203,36 +198,28 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, role: str, user
     
     try:
         while True:
-            # Receive message from client
             data = await websocket.receive_text()
             message = json.loads(data)
             
             logger.info(f"Received from {role} {user_id}: {message.get('type', 'unknown')}")
             
-            # Handle different message types
             if role == "student":
-                # Student sends feedback events to teacher
                 if message.get("type") in ["drowsy", "looking_away", "distracted", "engaged", "alert"]:
-                    # Add metadata
                     message["student_id"] = user_id
                     message["student_name"] = manager.students_metadata.get(room_id, {}).get(user_id, {}).get("name", user_id)
                     message["timestamp"] = datetime.now().isoformat()
                     
-                    # Broadcast to all teachers in the room
                     await manager.broadcast_to_teachers(room_id, message)
                 
-                # Handle status updates
                 elif message.get("type") == "status_update":
                     if room_id in manager.students_metadata and user_id in manager.students_metadata[room_id]:
                         manager.students_metadata[room_id][user_id]["status"] = message.get("status", "active")
             
             elif role == "teacher":
-                # Teacher sends commands or requests
                 if message.get("type") == "request_participants":
                     await manager.send_participants_list(websocket, room_id)
                 
                 elif message.get("type") == "message_to_student":
-                    # Send message to specific student
                     target_student = message.get("student_id")
                     if target_student:
                         await manager.send_to_student(room_id, target_student, {
@@ -249,6 +236,9 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, role: str, user
         logger.error(f"Error in WebSocket connection: {e}")
         manager.disconnect(websocket, room_id, role, user_id)
 
+# This is important for Render deployment
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import os
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
