@@ -4,6 +4,7 @@ from typing import Dict, Set
 import json
 from datetime import datetime
 import logging
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -17,15 +18,16 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://localhost:3000",
+        "https://live-feedback-frontend-vercel.vercel.app",
         "https://*.vercel.app",
-        "*"  # Allow all for testing - restrict in production
+        "*"
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Connection Manager for WebSocket
+# Connection Manager
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, Dict[str, Set[WebSocket]]] = {}
@@ -146,14 +148,6 @@ async def health_check():
         "timestamp": datetime.now().isoformat()
     }
 
-@app.get("/api/health")
-async def api_health_check():
-    """Alternative health check endpoint"""
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat()
-    }
-
 @app.get("/rooms/{room_id}/stats")
 async def get_room_stats(room_id: str):
     if room_id not in manager.active_connections:
@@ -179,10 +173,6 @@ async def get_room_stats(room_id: str):
 
 @app.websocket("/ws/{room_id}/{role}/{user_id}")
 async def websocket_endpoint(websocket: WebSocket, room_id: str, role: str, user_id: str):
-    """
-    WebSocket endpoint for real-time communication
-    """
-    
     if role not in ["teacher", "student"]:
         await websocket.close(code=1008, reason="Invalid role")
         return
@@ -236,9 +226,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, role: str, user
         logger.error(f"Error in WebSocket connection: {e}")
         manager.disconnect(websocket, room_id, role, user_id)
 
-# This is important for Render deployment
 if __name__ == "__main__":
     import uvicorn
-    import os
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
